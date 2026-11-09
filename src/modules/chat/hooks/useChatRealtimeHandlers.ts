@@ -228,6 +228,12 @@ export function useChatRealtimeHandlers({
             }
           }
           if (sid) {
+            if (streamTimerRef.current) {
+              clearTimeout(streamTimerRef.current);
+              streamTimerRef.current = null;
+            }
+            accumulatedStreamRef.current = '';
+            sessionStore.discardStreaming(sid);
             // Surface the failure in the conversation and stop the spinner —
             // the run never started (or was rejected), so no `complete` follows.
             // A refused stop request is not about the run: the task had
@@ -254,6 +260,18 @@ export function useChatRealtimeHandlers({
           // never falls through to the message-kind handling below.
           sideQuestionStore.applyEvent(msg as unknown as SideQuestionEvent);
           return;
+        }
+
+        case 'error': {
+          if (sid) {
+            if (streamTimerRef.current) {
+              clearTimeout(streamTimerRef.current);
+              streamTimerRef.current = null;
+            }
+            accumulatedStreamRef.current = '';
+            sessionStore.discardStreaming(sid);
+          }
+          break;
         }
 
         // Sidebar/global events — owned by useProjectsState.

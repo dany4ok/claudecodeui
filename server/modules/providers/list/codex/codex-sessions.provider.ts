@@ -417,6 +417,125 @@ export function readCodexMemoryCitations(text: string): { text: string; memoryCi
   return memoryCitations.length > 0 ? { text: prose, memoryCitations } : { text: prose };
 }
 
+type CodexTextToolCall = {
+  name: string;
+  input: string | Record<string, string>;
+};
+
+/**
+ * Parses the legacy XML tool-call format emitted by models that do not expose
+ * native function-call events. This parser is deliberately allow-list agnostic:
+ * it only identifies the envelope. Execution must still happen through the
+ * provider's registered tool dispatcher; transcript code must never execute
+ * model-authored text.
+ *
+ * Complete calls are removed from the assistant text so `<tool_call>` can never
+ * leak into the UI. Incomplete or malformed envelopes are also removed, but are
+ * left for the caller to report as a recoverable tool error.
+ */
+export function parseCodexTextToolCalls(text: string): {
+  text: string;
+  calls: CodexTextToolCall[];
+  malformed: boolean;
+} {
+  const complete = /<tool_call\b[^>]*>\s*<function=([^>\s]+)>([\s\S]*?)<\/function>\s*<\/tool_call>/gi;
+  const calls: CodexTextToolCall[] = [];
+  let cleaned = text.replace(complete, (_whole, rawName: string, body: string) => {
+    const name = rawName.trim();
+    const parameters: Record<string, string> = {};
+    const parameterPattern = /<parameter=([^>\s]+)>([\s\S]*?)<\/parameter>/gi;
+    let parameterMatch: RegExpExecArray | null;
+    while ((parameterMatch = parameterPattern.exec(body)) !== null) {
+      parameters[parameterMatch[1].trim()] = parameterMatch[2];
+    }
+
+    const parameterNames = Object.keys(parameters);
+    calls.push({
+      name,
+      input: parameterNames.length === 1 && parameterNames[0] === 'cmd'
+        ? parameters.cmd
+        : parameters,
+    });
+    return '';
+  });
+
+  const malformed = /<tool_call\b|<function=|<\/tool_call>|<\/function>/i.test(cleaned);
+  if (malformed) {
+    cleaned = cleaned
+      .replace(/<tool_call\b[\s\S]*$/i, '')
+      .replace(/<\/tool_call>|<\/function>/gi, '');
+  }
+
+  return { text: cleaned.replace(/\n{3,}/g, '\n\n').trim(), calls, malformed };
+}
+
+function hasCodexTextToolCall(text: string): boolean {
+  return /<tool_call\b|<function=|<\/(?:tool_call|function)>/i.test(text);
+}
+
+function normalizeCodexTextToolCall(
+  text: string,
+  sessionId: string | null,
+  timestamp: string,
+  memoryCitations?: MemoryCitation[],
+): NormalizedMessage[] {
+  const parsed = parseCodexTextToolCalls(text);
+  const messages: NormalizedMessage[] = [];
+  if (parsed.text) {
+    messages.push(createNormalizedMessage({
+      id: generateMessageId('codex-text'),
+      sessionId,
+      timestamp,
+      provider: PROVIDER,
+      kind: 'text',
+      role: 'assistant',
+      content: parsed.text,
+      memoryCitations,
+    }));
+  }
+
+  parsed.calls.forEach((call, index) => {
+    const toolId = generateMessageId(`codex-legacy-tool-${index}`);
+    messages.push(createNormalizedMessage({
+      id: toolId,
+      sessionId,
+      timestamp,
+      provider: PROVIDER,
+      kind: 'tool_use',
+      toolName: call.name,
+      toolInput: call.input,
+      toolId,
+      memoryCitations,
+    }));
+    messages.push(createNormalizedMessage({
+      id: `${toolId}_result`,
+      sessionId,
+      timestamp,
+      provider: PROVIDER,
+      kind: 'tool_result',
+      toolId,
+      content: `Tool "${call.name}" was received in legacy XML format but was not executed. The provider must emit a native tool call; retry the operation.`,
+      isError: true,
+    }));
+  });
+
+  if (parsed.malformed) {
+    messages.push(createNormalizedMessage({
+      id: generateMessageId('codex-invalid-tool-call'),
+      sessionId,
+      timestamp,
+      provider: PROVIDER,
+      kind: 'error',
+      content: 'Invalid or incomplete XML tool call received. It was not executed.',
+    }));
+  }
+
+  if (parsed.calls.length > 0 || parsed.malformed) {
+    console.warn(`[CodexToolCall] legacy XML received: calls=${parsed.calls.length}, malformed=${parsed.malformed}`);
+  }
+  return messages;
+}
+
 function extractCodexToolOutput(output: unknown): string {
   if (typeof output === 'string') {
     return output;
@@ -2106,6 +2225,10 @@ export class CodexSessionsProvider implements IProviderSessions {
       if (!content.trim()) {
         return [];
       }
+      const legacyToolMessages = normalizeCodexTextToolCall(content, sessionId, ts, raw.memoryCitations);
+      if (legacyToolMessages.length > 0 && hasCodexTextToolCall(content)) {
+        return legacyToolMessages;
+      }
       return [createNormalizedMessage({
         id: baseId,
         sessionId,
@@ -2175,6 +2298,10 @@ export class CodexSessionsProvider implements IProviderSessions {
         case 'agent_message': {
           const cited = readCodexMemoryCitations(String(raw.message?.content || ''));
           const text = cited.text;
+          const legacyToolMessages = normalizeCodexTextToolCall(text, sessionId, ts, cited.memoryCitations);
+          if (legacyToolMessages.length > 0 && hasCodexTextToolCall(text)) {
+            return legacyToolMessages;
+          }
           const proposedPlan = readCodexProposedPlan(text);
           if (proposedPlan) {
             // Same unification as history: a proposed plan is a plan card, not

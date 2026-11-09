@@ -3,7 +3,13 @@ import assert from 'node:assert/strict';
 import { test } from 'vitest';
 
 import type { NormalizedMessage } from '@/shared/types';
-import { normalizedToChatMessages } from '@/modules/chat/hooks/useChatMessages';
+import { normalizedToChatMessages, scrubAssistantToolMarkup } from '@/modules/chat/hooks/useChatMessages';
+
+test('scrubs complete and incomplete legacy tool XML before rendering', () => {
+  assert.equal(scrubAssistantToolMarkup('Before\n<tool_call><function=functions.exec_command><parameter=cmd>echo x</parameter></function></tool_call>After'), 'Before\nAfter');
+  assert.equal(scrubAssistantToolMarkup('<tool_call><function=functions.exec_command><parameter=cmd>unfinished'), '');
+  assert.equal(scrubAssistantToolMarkup('Plain assistant text'), 'Plain assistant text');
+});
 
 function message(
   id: string,

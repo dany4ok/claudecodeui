@@ -860,6 +860,17 @@ export function useSessionStore() {
     }
   }, [notify]);
 
+  /** Drop a partial stream when the provider rejects the turn or loses readiness. */
+  const discardStreaming = useCallback((sessionId: string) => {
+    const slot = storeRef.current.get(sessionId);
+    if (!slot) return;
+    const next = slot.realtimeMessages.filter(message => message.id !== `__streaming_${sessionId}`);
+    if (next.length === slot.realtimeMessages.length) return;
+    slot.realtimeMessages = next;
+    recomputeMergedIfNeeded(slot);
+    notify(sessionId);
+  }, [notify]);
+
   /**
    * Get merged messages for a session (for rendering).
    */
@@ -884,11 +895,12 @@ export function useSessionStore() {
     isStale,
     updateStreaming,
     finalizeStreaming,
+    discardStreaming,
     getMessages,
     getSessionSlot,
   }), [
     fetchFromServer, fetchMore, appendRealtime, truncateAt, refreshLatestFromServer,
-    setActiveSession, isStale, updateStreaming, finalizeStreaming,
+    setActiveSession, isStale, updateStreaming, finalizeStreaming, discardStreaming,
     getMessages, getSessionSlot,
   ]);
 }

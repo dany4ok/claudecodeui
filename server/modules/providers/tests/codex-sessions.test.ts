@@ -6,7 +6,12 @@ import test from 'node:test';
 
 import { closeConnection, initializeDatabase, sessionsDb } from '@/modules/database/index.js';
 import { CodexSessionSynchronizer } from '@/modules/providers/list/codex/codex-session-synchronizer.provider.js';
-import { CodexSessionsProvider, parseCodexExecScript, readCodexMemoryCitations } from '@/modules/providers/list/codex/codex-sessions.provider.js';
+import {
+  CodexSessionsProvider,
+  parseCodexExecScript,
+  parseCodexTextToolCalls,
+  readCodexMemoryCitations,
+} from '@/modules/providers/list/codex/codex-sessions.provider.js';
 
 const patchHomeDir = (nextHomeDir: string) => {
   const original = os.homedir;
@@ -482,6 +487,44 @@ test('Codex memory citations are lifted out of the reply they trail', () => {
     { source: 'MEMORY.md:137-142', note: 'used verified container provisioning details' },
     { source: 'notes/deploy.md:4-9' },
   ]);
+});
+
+test('Codex legacy XML tool calls are parsed without executing or leaking XML', () => {
+  const input = [
+    'I will make the change.',
+    '<tool_call>',
+    '<function=apply_patch>',
+    '<parameter=cmd>*** Begin Patch\n*** Add File: probe.txt\n+ok\n*** End Patch</parameter>',
+    '</function>',
+    '</tool_call>',
+  ].join('\n');
+
+  const parsed = parseCodexTextToolCalls(input);
+
+  assert.equal(parsed.malformed, false);
+  assert.equal(parsed.text, 'I will make the change.');
+  assert.equal(parsed.calls.length, 1);
+  assert.equal(parsed.calls[0].name, 'apply_patch');
+  assert.equal(parsed.calls[0].input, '*** Begin Patch\n*** Add File: probe.txt\n+ok\n*** End Patch');
+  assert.doesNotMatch(parsed.text, /<tool_call>|<function=/);
+});
+
+test('Codex legacy XML parser supports consecutive MCP calls and rejects incomplete XML', () => {
+  const parsed = parseCodexTextToolCalls([
+    '<tool_call><function=mcp__node_repl.js><parameter=cmd>1 + 1</parameter></function></tool_call>',
+    '<tool_call><function=mcp__node_repl.js><parameter=cmd>2 + 2</parameter></function></tool_call>',
+  ].join('\n'));
+
+  assert.equal(parsed.calls.length, 2);
+  assert.equal(parsed.calls[0].name, 'mcp__node_repl.js');
+  assert.equal(parsed.calls[0].input, '1 + 1');
+  assert.equal(parsed.calls[1].input, '2 + 2');
+  assert.equal(parsed.text, '');
+
+  const invalid = parseCodexTextToolCalls('<tool_call><function=apply_patch><parameter=cmd>unfinished');
+  assert.equal(invalid.calls.length, 0);
+  assert.equal(invalid.malformed, true);
+  assert.equal(invalid.text, '');
 });
 
 test('a plan followed by a memory citation is still recognized as a plan', async () => {

@@ -12,6 +12,14 @@ function formatToolResultContent(content: unknown): string {
   return toolUseErrorMatch ? toolUseErrorMatch[1] : text;
 }
 
+/** Final UI-side safety net: model-authored XML must never be rendered as prose. */
+export function scrubAssistantToolMarkup(content: string): string {
+  let text = String(content ?? '').replace(/<tool_call\b[^>]*>[\s\S]*?<\/tool_call>/gi, '');
+  const marker = /<tool_call\b|<function=|<\/(?:tool_call|function)>/i.exec(text);
+  if (marker) text = text.slice(0, marker.index);
+  return text.trim();
+}
+
 type ParsedTaskNotification = {
   status: string;
   summary: string;
@@ -435,7 +443,7 @@ export function normalizedToChatMessages(messages: NormalizedMessage[]): ChatMes
             });
           }
         } else {
-          const text = formatUsageLimitText(content);
+          const text = scrubAssistantToolMarkup(formatUsageLimitText(content));
           converted.push({
             type: 'assistant',
             content: text,
@@ -530,9 +538,11 @@ export function normalizedToChatMessages(messages: NormalizedMessage[]): ChatMes
 
       case 'stream_delta':
         if (msg.content) {
+          const text = scrubAssistantToolMarkup(msg.content);
+          if (!text) break;
           converted.push({
             type: 'assistant',
-            content: msg.content,
+            content: text,
             timestamp: msg.timestamp,
             isStreaming: true,
             ...sharedMetadata,
